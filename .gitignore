@@ -1,0 +1,21 @@
+# --- Virtual Environment ---
+.venv/
+.python-version
+
+# --- Frontend ---
+node_modules/
+
+# --- Django & Python ---
+__pycache__/
+db.sqlite3
+staticfiles/
+media/
+
+# --- Logs & Local Configs ---
+*.log
+logs/
+.claude/
+
+# --- Environment Variables ---
+.env
+.env.*
