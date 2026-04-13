@@ -92,6 +92,9 @@ class RAGChatbot:
         )
         
         self.is_initialized = True
+
+        # Set hybrid mode
+        self.set_mode('hybrid')
         
         _safe_print("\n✅ Enhanced RAG System initialized successfully!")
         _safe_print(f"   📊 Table extraction: {'Enabled' if self.config.ENABLE_TABLE_EXTRACTION else 'Disabled'}")
@@ -626,18 +629,11 @@ class RAGChatbot:
             if is_multilingual:
                 system_prompt = (
                     "MULTILINGUAL INSTRUCTION — READ CAREFULLY:\n"
-                    "• The document context below is written in English.\n"
                     "• The user has asked their question in Hindi, Hinglish, or another Indian language.\n"
                     "• You MUST answer in the EXACT same language/script the user used.\n"
-                    "• You MUST extract facts from the English context and express them in the user's language.\n"
-                    "• NEVER say 'I don't know' or 'mujhe pata nahi' if the context contains the answer.\n"
-                    "• NEVER answer from general knowledge when English context is provided — "
-                    "translate and summarise the context facts instead.\n"
-                    "• CRITICAL: Do NOT confuse different characters or people in the context. "
-                    "Each person has their own role/attributes — do NOT apply one person's details to another.\n"
-                    "• CRITICAL: If the context does NOT contain the specific information asked, "
-                    "say so honestly in the user's language. Do NOT infer, guess, or hallucinate details "
-                    "that are not explicitly written in the context.\n\n"
+                    "• PRIORITY 1 (DOCUMENT CONTEXT): If English document context is provided and contains the answer, extract those facts, translate, and express them in the user's language.\n"
+                    "• PRIORITY 2 (GENERAL KNOWLEDGE): If the provided context does NOT contain the answer, or if no context is provided at all, you must use your own general knowledge to answer the question.\n"
+                    "• CRITICAL: Do NOT confuse different characters or people in the context. Each person has their own role/attributes.\n\n"
                 ) + system_prompt
 
             # ── Translate mode: user spoke English but wants reply in another language ──
@@ -645,16 +641,10 @@ class RAGChatbot:
                 target = self._LANG_NAMES.get(reply_lang, reply_lang)
                 system_prompt = (
                     f"TRANSLATE MODE — CRITICAL INSTRUCTION:\n"
-                    f"• The user spoke in English.\n"
-                    f"• You MUST write your ENTIRE response in {target}.\n"
-                    f"• Do NOT include any English text in your response — translate everything to {target}.\n"
-                    f"• CRITICAL: Do NOT confuse different characters/people. "
-                    f"Each person has their own role — do NOT mix up attributes between different people.\n"
-                    f"• If document context is provided, summarise and translate ONLY what is explicitly "
-                    f"stated in the context — do NOT guess or add information not present.\n"
-                    f"• If the document context does NOT contain the answer, say clearly in {target} that "
-                    f"the information is not available in the provided documents.\n"
-                    f"• Answer naturally and conversationally in {target}.\n\n"
+                    f"• The user spoke in English, but you MUST write your ENTIRE response in {target}.\n"
+                    f"• PRIORITY 1 (DOCUMENT CONTEXT): If English document context is provided and contains the answer, extract those facts, translate, and express them in {target}.\n"
+                    f"• PRIORITY 2 (GENERAL KNOWLEDGE): If the provided context does NOT contain the answer, or if no context is provided at all, you must use your own general knowledge to answer the question, translated into {target}.\n"
+                    f"• CRITICAL: Do NOT confuse different characters/people. Each person has their own role — do NOT mix up attributes between different people.\n\n"
                 ) + system_prompt
 
             # ── English mode: enforce English even if session history has other languages ──

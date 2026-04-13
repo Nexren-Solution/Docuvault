@@ -41,7 +41,7 @@ class RAGConfig:
     # ==================== RETRIEVAL ====================
 
     N_RESULTS = 6
-    SIMILARITY_THRESHOLD = 0.25
+    SIMILARITY_THRESHOLD = 0.50
 
     USE_HYBRID_SEARCH = True
     SEMANTIC_WEIGHT = 0.7
@@ -140,7 +140,7 @@ Answer using general knowledge.
 
 Question: {question}
 
-Answer ONLY from context.
+Answer using the provided context first. If the provided context does not contain the answer, use your general knowledge to answer the question. Do NOT say "the context does not contain the information", just answer the question directly.
 """
 
     STRICT_NO_CONTEXT_RESPONSE = "I cannot find relevant information in documents."
