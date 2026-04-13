@@ -660,33 +660,27 @@ class RAGChatbot:
             if has_context:
                 context = self.retriever.format_context_enhanced(filtered_docs, filtered_metas)
                 if is_multilingual:
-                    # Explicit bilingual scaffold for Hindi/Hinglish answers
                     user_msg = (
-                        "=== DOCUMENT CONTEXT (English) ===\n"
+                        "=== DOCUMENT CONTEXT ===\n"
                         f"{context}\n\n"
                         "=== USER QUESTION ===\n"
                         f"{original_question}\n\n"
-                        "TASK: Using ONLY the information explicitly written in the document context above, "
-                        "answer the question. Write your answer in the same language as the question "
-                        "(Hindi or Hinglish if the question is in those languages). "
-                        "If the context DOES contain the answer, extract it and translate it — do not "
-                        "add details not in the context. "
-                        "If the context does NOT contain the answer to the question, say clearly in the "
-                        "user's language that this specific information is not in the documents."
+                        "TASK: Answer the question using the provided context first. "
+                        "If the context does NOT contain the answer, use your general knowledge. "
+                        "Write your answer in the EXACT same language as the question. "
+                        "Do NOT say 'according to the context' or 'the context does not contain this'. Just answer directly."
                     )
                 elif reply_lang and reply_lang not in ('en-IN', 'en-US', 'en'):
-                    # Translate mode + context: strict bilingual scaffold
                     target = self._LANG_NAMES.get(reply_lang, reply_lang)
                     user_msg = (
-                        "=== DOCUMENT CONTEXT (English) ===\n"
+                        "=== DOCUMENT CONTEXT ===\n"
                         f"{context}\n\n"
                         "=== USER QUESTION ===\n"
                         f"{original_question}\n\n"
-                        f"TASK: Using ONLY the information explicitly written in the document context "
-                        f"above, answer the question. Write your ENTIRE answer in {target}. "
-                        f"Extract and translate facts from the context — do NOT add details not in the "
-                        f"context. If the context does NOT contain the answer, say clearly in {target} "
-                        f"that this information is not available in the documents."
+                        f"TASK: Answer the question using the provided context first. "
+                        f"If the context does NOT contain the answer, use your general knowledge. "
+                        f"Write your ENTIRE answer in {target}. "
+                        f"Do NOT say 'according to the context' or 'the context does not contain this'. Just answer directly."
                     )
                 else:
                     user_msg = self.config.WITH_CONTEXT_TEMPLATE.format(
@@ -700,14 +694,12 @@ class RAGChatbot:
                 return
             else:
                 if is_multilingual:
-                    # For multilingual no-context: refuse to hallucinate, ask to check documents
+                    # Allow general knowledge fallback in the user's language
                     user_msg = (
                         f"The user asked: {original_question}\n\n"
-                        "No relevant information was found in the indexed documents for this query.\n"
-                        "Tell the user in the same language they used that this specific information "
-                        "was not found in the indexed documents. "
-                        "Do NOT make up, guess, or invent any answer. "
-                        "Suggest they verify the relevant document is uploaded and indexed."
+                        "No relevant information was found in the indexed documents for this query. "
+                        "Please answer the user's question using your general knowledge. "
+                        "You MUST write your answer in the EXACT same language/script the user used."
                     )
                 else:
                     user_msg = self.config.NO_CONTEXT_TEMPLATE.format(question=original_question)
