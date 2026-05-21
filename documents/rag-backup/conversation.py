@@ -6,10 +6,9 @@ Integrates all enhanced components for better document Q&A with flexible knowled
 from typing import List, Dict, Tuple, Optional
 import sys
 import time
-import threading
 
 from .config import RAGConfig
-
+import threading
 
 def _safe_print(*args, **kwargs):
     """Print with Unicode-safe fallback for Windows consoles."""
@@ -54,12 +53,9 @@ class RAGChatbot:
         
         # Conversation memory by thread
         self.conversation_memory = {}
-
+        
         # System status
         self.is_initialized = False
-
-        # Serialize concurrent index_documents() calls so ChromaDB writes
-        # never overlap (ChromaDB is not thread-safe for concurrent writes)
         self._index_lock = threading.Lock()
     
     def initialize(self, db_path: str = None, reset: bool = False):
@@ -96,6 +92,9 @@ class RAGChatbot:
         )
         
         self.is_initialized = True
+
+        # Set hybrid mode
+        self.set_mode('hybrid')
         
         _safe_print("\n✅ Enhanced RAG System initialized successfully!")
         _safe_print(f"   📊 Table extraction: {'Enabled' if self.config.ENABLE_TABLE_EXTRACTION else 'Disabled'}")
@@ -115,69 +114,71 @@ class RAGChatbot:
     
     def index_documents(self, pdf_path: str = None, documents: List = None,
                        extract_tables: bool = None,
-                       describe_images: bool = None,
-                       org_id: str = None):
+                       describe_images: bool = None):
         """
-        Index documents with enhanced processing.
-        Thread-safe: serialized with _index_lock so concurrent background
-        threads never corrupt the ChromaDB vector store.
+        Index documents with enhanced processing
+        
+        Args:
+            pdf_path: Path to single PDF file
+            documents: Pre-loaded LangChain documents
+            extract_tables: Override config for table extraction
+            describe_images: Override config for image description
         """
         if not self.is_initialized:
             raise RuntimeError("System not initialized. Call initialize() first.")
-
+        
         extract_tables = extract_tables if extract_tables is not None else self.config.ENABLE_TABLE_EXTRACTION
         describe_images = describe_images if describe_images is not None else self.config.ENABLE_IMAGE_DESCRIPTION
-
-        # CPU-bound work (chunking, embedding) can run outside the lock;
-        # only the ChromaDB write needs serialization.
+        
         _safe_print("\n" + "="*70)
         _safe_print("📚 Starting Document Indexing")
         _safe_print("="*70)
-
+        
         start_time = time.time()
-
+        
         # Process documents
         if pdf_path:
             _safe_print(f"Processing PDF: {pdf_path}")
+            # chunks = self.document_processor.process_document_complete(
+            #     pdf_path=pdf_path,
+            #     extract_tables=extract_tables,
+            #     describe_images=describe_images
+            # )
             chunks = self.document_processor.process_document_complete(
-                pdf_path=pdf_path,
+                file_path=pdf_path,
                 extract_tables=extract_tables,
                 describe_images=describe_images
             )
+
         elif documents:
             _safe_print(f"Processing {len(documents)} pre-loaded documents")
             chunks = self.document_processor.split_documents_smart(documents)
         else:
             raise ValueError("Either pdf_path or documents must be provided")
-
+        
         if not chunks:
             _safe_print("⚠️  No chunks created from documents")
             return
-
+        
         # Prepare for embedding
         texts = [chunk.page_content for chunk in chunks]
         metadatas = [chunk.metadata for chunk in chunks]
         chunk_types = [meta.get('chunk_type', 'text') for meta in metadatas]
-
-        # Stamp every chunk with the organization so queries can be filtered per-tenant
-        if org_id:
-            for meta in metadatas:
-                meta['org_id'] = org_id
-
-        # Generate embeddings (slow, CPU-bound — fine to run concurrently)
+        
+        # Generate embeddings with preprocessing
         embeddings = self.embedding_manager.generate_embeddings_enhanced(
             texts=texts,
             chunk_types=chunk_types,
             show_progress=True
         )
-
+        
         # Generate unique IDs
         ids = [
             f"{meta.get('source', 'doc')}_{meta.get('page', 0)}_{meta.get('chunk_index', i)}"
             for i, meta in enumerate(metadatas)
         ]
-
-        # Serialize the ChromaDB write — ChromaDB is not safe for concurrent writes
+        
+        # Serialize ChromaDB writes — not safe for concurrent access
         with self._index_lock:
             self.vector_store.add_documents(
                 embeddings=embeddings.tolist(),
@@ -186,8 +187,10 @@ class RAGChatbot:
                 ids=ids
             )
 
-        processing_time = time.time() - start_time
 
+        
+        processing_time = time.time() - start_time
+        
         _safe_print(f"\n✅ Indexing completed in {processing_time:.2f}s")
         _safe_print(f"   📦 Total chunks in vector store: {self.vector_store.get_document_count()}")
         
@@ -203,29 +206,14 @@ class RAGChatbot:
         
         _safe_print("="*70 + "\n")
     
-    def query(self, question: str,
-             thread_id: str = "default",
-             n_results: int = None,
-             use_rewrite: bool = True,
-             use_hybrid: bool = None,
-             allow_general_knowledge: bool = None,
-             force_mode: str = None,
-             org_id: str = None) -> Tuple[str, List[Dict]]:
-        """
-        Query the RAG system with a question
-        
-        Args:
-            question: User question
-            thread_id: Conversation thread ID
-            n_results: Number of results to retrieve (default: config)
-            use_rewrite: Whether to rewrite follow-up questions
-            use_hybrid: Whether to use hybrid search (default: config)
-            allow_general_knowledge: Override config for this query (True/False/None)
-            force_mode: Force a specific mode for this query ('strict'/'hybrid'/'indicated'/None)
-            
-        Returns:
-            Tuple of (answer, sources)
-        """
+    def query(self, question: str, 
+            thread_id: str = "default",
+            n_results: int = None,
+            use_rewrite: bool = True,
+            use_hybrid: bool = None,
+            allow_general_knowledge: bool = None,
+            force_mode: str = None) -> Tuple[str, List[Dict]]:
+
         if not self.is_initialized:
             raise RuntimeError("System not initialized. Call initialize() first.")
         
@@ -235,7 +223,7 @@ class RAGChatbot:
         
         start_time = time.time()
         
-        # Determine operating mode for this query
+        # ---------------- MODE ----------------
         if force_mode:
             if force_mode == 'strict':
                 use_strict_mode = True
@@ -245,7 +233,7 @@ class RAGChatbot:
                 use_strict_mode = False
                 use_general_knowledge = True
                 use_indicated_mode = True
-            else:  # 'hybrid'
+            else:
                 use_strict_mode = False
                 use_general_knowledge = True
                 use_indicated_mode = False
@@ -253,50 +241,34 @@ class RAGChatbot:
             use_strict_mode = self.config.STRICT_DOCUMENT_MODE
             use_indicated_mode = self.config.INDICATE_KNOWLEDGE_SOURCE
             
-            # Determine if general knowledge is allowed
             if allow_general_knowledge is not None:
                 use_general_knowledge = allow_general_knowledge
             else:
                 use_general_knowledge = self.config.ALLOW_GENERAL_KNOWLEDGE and not use_strict_mode
         
-        # Get conversation history
+        # ---------------- HISTORY ----------------
         chat_history = self.conversation_memory.get(thread_id, [])
         
-        # Rewrite query if it's a follow-up
         original_question = question
+        
         if use_rewrite and chat_history:
             question = self.retriever.rewrite_query(question, chat_history)
             if question != original_question:
                 _safe_print(f"🔄 Rewritten query: {question}")
         
-        # ── Excel/spreadsheet structured query short-circuit ─────────────────
-        # If the question is an aggregation/filter query and the org has indexed
-        # Excel files, run it through pandas directly instead of vector retrieval.
-        try:
-            from .excel_tool import query_excel
-            excel_answer = query_excel(original_question, org_id, self.llm_manager)
-            if excel_answer:
-                _safe_print("[ExcelTool] Answered via pandas — skipping vector retrieval")
-                self._update_conversation_memory(thread_id, original_question, excel_answer)
-                return excel_answer, []
-        except Exception as _exc:
-            _safe_print(f"[ExcelTool] Error (falling back to RAG): {_exc}")
-
-        # Retrieve relevant documents
+        # ---------------- RETRIEVAL ----------------
         n_results = n_results or self.config.N_RESULTS
         use_hybrid = use_hybrid if use_hybrid is not None else self.config.USE_HYBRID_SEARCH
-
-        metadata_filter = {"org_id": org_id} if org_id else None
+        
         documents, metadatas, similarities = self.retriever.retrieve(
             query=question,
             n_results=n_results,
-            metadata_filter=metadata_filter,
             use_hybrid=use_hybrid
         )
-
+        
         retrieval_time = time.time() - start_time
         
-        # Determine system prompt based on mode
+        # ---------------- PROMPT ----------------
         if use_strict_mode:
             system_prompt = self.config.STRICT_SYSTEM_PROMPT
             mode_label = "STRICT"
@@ -309,113 +281,105 @@ class RAGChatbot:
         
         _safe_print(f"🎯 Query mode: {mode_label}")
         
-        # Prepare messages for LLM
-        messages = [
-            {"role": "system", "content": system_prompt},
-        ]
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.extend(chat_history[-self.config.MAX_HISTORY_TURNS:])
         
-        # Add conversation history (limited)
-        history_to_include = chat_history[-self.config.MAX_HISTORY_TURNS:]
-        messages.extend(history_to_include)
-        
-        # Determine if we have relevant context
-        has_relevant_context = False
+        # ---------------- FILTER ----------------
         filtered_docs = []
         filtered_metas = []
         filtered_sims = []
         
         if documents:
-            # Filter by similarity threshold
             for doc, meta, sim in zip(documents, metadatas, similarities):
                 if sim >= self.config.SIMILARITY_THRESHOLD:
                     filtered_docs.append(doc)
                     filtered_metas.append(meta)
                     filtered_sims.append(sim)
-            
-            has_relevant_context = len(filtered_docs) > 0
         
-        # Build user message based on context availability and mode
-        if has_relevant_context:
-            top_score = filtered_sims[0] if filtered_sims else self.config.SIMILARITY_THRESHOLD
-            strong = top_score >= self.config.STRONG_CONTEXT_THRESHOLD
-            _safe_print(f"📄 Retrieved {len(filtered_docs)} chunks (top score: {top_score:.3f}, strong: {strong})")
-
-            if strong or use_strict_mode:
-                # Context is directly on-topic — use it as the main source
-                context = self.retriever.format_context_enhanced(filtered_docs, filtered_metas)
-                user_message = self.config.WITH_CONTEXT_TEMPLATE.format(
-                    context=context,
-                    question=original_question
-                )
-                sources = self.retriever.prepare_sources_enhanced(
-                    filtered_docs, filtered_metas, filtered_sims
-                )
-            elif use_general_knowledge:
-                # Context is only tangentially relevant — drop it, answer from pure GK
-                _safe_print("⚠️  Weak context (top score below STRONG threshold) — switching to pure GK")
-                user_message = self.config.NO_CONTEXT_TEMPLATE.format(question=original_question)
-                sources = []
-            else:
-                context = self.retriever.format_context_enhanced(filtered_docs, filtered_metas)
-                user_message = self.config.WITH_CONTEXT_TEMPLATE.format(
-                    context=context,
-                    question=original_question
-                )
-                sources = self.retriever.prepare_sources_enhanced(
-                    filtered_docs, filtered_metas, filtered_sims
-                )
+        # ---------------- 🔥 SMART LOGIC ----------------
+        is_generic = self._is_generic_question(original_question)
+        is_strong_context = self._is_context_strong(filtered_sims)
+        
+        has_relevant_context = (
+            len(filtered_docs) > 0
+            and is_strong_context
+            and not is_generic
+        )
+        
+        # ---------------- 🔥 GENERIC HANDLING ----------------
+        if is_generic:
+            _safe_print("⚠️ Generic question detected — asking clarification")
             
+            clarification = (
+                "Could you please specify what you are referring to? "
+                "For example, mention the document name, section, or topic."
+            )
+            
+            self._update_conversation_memory(thread_id, original_question, clarification)
+            return clarification, []
+        
+        # ---------------- RESPONSE BUILD ----------------
+        if has_relevant_context:
+            _safe_print(f"📄 Using {len(filtered_docs)} strong context chunks")
+            
+            context = self.retriever.format_context_enhanced(filtered_docs, filtered_metas)
+            
+            # 🔥 prevent long dump
+            context = context[:1500]
+            
+            user_message = self.config.WITH_CONTEXT_TEMPLATE.format(
+                context=context,
+                question=original_question
+            )
+            
+            sources = self.retriever.prepare_sources_enhanced(
+                filtered_docs,
+                filtered_metas,
+                filtered_sims
+            )
+        
         else:
-            # No relevant context found
-            _safe_print("⚠️  No relevant documents found")
+            _safe_print("⚠️ Weak or no context")
             
             if use_strict_mode or not use_general_knowledge:
-                # Strict mode or general knowledge disabled - cannot answer
-                _safe_print("❌ Cannot answer without document context (strict mode)")
+                answer = self.config.STRICT_NO_CONTEXT_RESPONSE
                 
-                # Still update conversation memory
-                self._update_conversation_memory(
-                    thread_id,
-                    original_question,
-                    self.config.STRICT_NO_CONTEXT_RESPONSE
-                )
-                
-                return self.config.STRICT_NO_CONTEXT_RESPONSE, []
+                self._update_conversation_memory(thread_id, original_question, answer)
+                return answer, []
             
-            else:
-                # Use general knowledge
-                _safe_print("💡 Using general knowledge")
-                
-                user_message = self.config.NO_CONTEXT_TEMPLATE.format(
-                    question=original_question
-                )
-                
-                sources = []
+            _safe_print("💡 Using general knowledge")
+            
+            user_message = self.config.NO_CONTEXT_TEMPLATE.format(
+                question=original_question
+            )
+            
+            sources = []
         
         messages.append({"role": "user", "content": user_message})
         
-        # Generate answer
+        # ---------------- GENERATION ----------------
         gen_start = time.time()
+        
         answer = self.llm_manager.generate(
             messages=messages,
             max_new_tokens=self.config.MAX_NEW_TOKENS,
             temperature=self.config.TEMPERATURE
         )
-        generation_time = time.time() - gen_start
         
+        generation_time = time.time() - gen_start
         total_time = time.time() - start_time
         
-        # Update conversation memory
+        # ---------------- MEMORY ----------------
         self._update_conversation_memory(thread_id, original_question, answer)
         
-        _safe_print(f"\n⏱️  Timing:")
+        _safe_print(f"\n⏱️ Timing:")
         _safe_print(f"   Retrieval: {retrieval_time:.2f}s")
         _safe_print(f"   Generation: {generation_time:.2f}s")
         _safe_print(f"   Total: {total_time:.2f}s")
         _safe_print("="*70 + "\n")
         
         return answer, sources
-    
+
     def _update_conversation_memory(self, thread_id: str, question: str, answer: str):
         """
         Update conversation memory for a thread
@@ -542,6 +506,48 @@ class RAGChatbot:
             return True
         ascii_count = sum(1 for c in alpha if ord(c) < 128)
         return (ascii_count / len(alpha)) > 0.70
+    
+
+    def _is_generic_question(self, question: str) -> bool:
+        q = question.lower().strip()
+
+        # Very strict generic patterns only
+        generic_patterns = [
+            "what is this",
+            "explain this",
+            "tell me about this",
+            "what is it"
+        ]
+
+        # Only block if BOTH:
+        # 1. Very short
+        # 2. No meaningful keywords
+        words = q.split()
+
+        if len(words) <= 3:
+            return True
+
+        # If it contains actual domain keywords → NOT generic
+        important_keywords = [
+            "engine", "system", "report", "result",
+            "finding", "experiment", "analysis",
+            "model", "data"
+        ]
+
+        if any(k in q for k in important_keywords):
+            return False
+
+        return any(p in q for p in generic_patterns)
+
+
+
+    def _is_context_strong(self, similarities: list) -> bool:
+        if not similarities:
+            return False
+
+        avg_sim = sum(similarities) / len(similarities)
+        return avg_sim >= 0.65   # tune later
+
 
     def _translate_for_retrieval(self, text: str) -> str:
         """
@@ -591,8 +597,7 @@ class RAGChatbot:
 
     def query_stream(self, question: str, thread_id: str = "default",
                     n_results: int = None, use_rewrite: bool = True,
-                    use_hybrid: bool = None, reply_lang: str = None,
-                    org_id: str = None):
+                    use_hybrid: bool = None, reply_lang: str = None):
         """
         Stream the response token by token using SSE-style generator.
 
@@ -622,21 +627,6 @@ class RAGChatbot:
             if use_rewrite and chat_history:
                 retrieval_question = self.retriever.rewrite_query(retrieval_question, chat_history)
 
-            # ── Excel/spreadsheet structured query short-circuit ─────────────
-            try:
-                from .excel_tool import query_excel
-                # excel_answer = query_excel(original_question, org_id, self.llm_manager)
-                excel_answer = query_excel(question, org_id, self.llm_manager)
-                if excel_answer:
-                    _safe_print("[ExcelTool] Stream: answered via pandas")
-                    yield {"type": "sources", "data": []}
-                    yield {"type": "token",   "data": excel_answer}
-                    yield {"type": "done",    "data": excel_answer}
-                    self._update_conversation_memory(thread_id, original_question, excel_answer)
-                    return
-            except Exception as _exc:
-                _safe_print(f"[ExcelTool] Stream error (falling back to RAG): {_exc}")
-
             # Retrieve relevant chunks using the English form of the query
             n_results = n_results or self.config.N_RESULTS
             use_hybrid = use_hybrid if use_hybrid is not None else self.config.USE_HYBRID_SEARCH
@@ -654,21 +644,6 @@ class RAGChatbot:
                     filtered_sims.append(sim)
 
             has_context = len(filtered_docs) > 0
-
-            # Determine if context is strong (directly relevant) or weak (tangential)
-            if has_context:
-                top_score = filtered_sims[0]
-                strong_context = top_score >= self.config.STRONG_CONTEXT_THRESHOLD
-                _safe_print(f"[stream] top_score={top_score:.3f} strong={strong_context}")
-            else:
-                strong_context = False
-
-            # For weak context in hybrid mode, treat as no-context so GK is used cleanly
-            if has_context and not strong_context and self.config.ALLOW_GENERAL_KNOWLEDGE and not self.config.STRICT_DOCUMENT_MODE:
-                _safe_print("[stream] Weak context — dropping docs, using GK")
-                has_context = False
-                filtered_docs, filtered_metas, filtered_sims = [], [], []
-
             sources = (
                 self.retriever.prepare_sources_enhanced(filtered_docs, filtered_metas, filtered_sims)
                 if has_context else []
@@ -684,18 +659,11 @@ class RAGChatbot:
             if is_multilingual:
                 system_prompt = (
                     "MULTILINGUAL INSTRUCTION — READ CAREFULLY:\n"
-                    "• The document context below is written in English.\n"
                     "• The user has asked their question in Hindi, Hinglish, or another Indian language.\n"
                     "• You MUST answer in the EXACT same language/script the user used.\n"
-                    "• You MUST extract facts from the English context and express them in the user's language.\n"
-                    "• NEVER say 'I don't know' or 'mujhe pata nahi' if the context contains the answer.\n"
-                    "• NEVER answer from general knowledge when English context is provided — "
-                    "translate and summarise the context facts instead.\n"
-                    "• CRITICAL: Do NOT confuse different characters or people in the context. "
-                    "Each person has their own role/attributes — do NOT apply one person's details to another.\n"
-                    "• CRITICAL: If the context does NOT contain the specific information asked, "
-                    "say so honestly in the user's language. Do NOT infer, guess, or hallucinate details "
-                    "that are not explicitly written in the context.\n\n"
+                    "• PRIORITY 1 (DOCUMENT CONTEXT): If English document context is provided and contains the answer, extract those facts, translate, and express them in the user's language.\n"
+                    "• PRIORITY 2 (GENERAL KNOWLEDGE): If the provided context does NOT contain the answer, or if no context is provided at all, you must use your own general knowledge to answer the question.\n"
+                    "• CRITICAL: Do NOT confuse different characters or people in the context. Each person has their own role/attributes.\n\n"
                 ) + system_prompt
 
             # ── Translate mode: user spoke English but wants reply in another language ──
@@ -703,16 +671,10 @@ class RAGChatbot:
                 target = self._LANG_NAMES.get(reply_lang, reply_lang)
                 system_prompt = (
                     f"TRANSLATE MODE — CRITICAL INSTRUCTION:\n"
-                    f"• The user spoke in English.\n"
-                    f"• You MUST write your ENTIRE response in {target}.\n"
-                    f"• Do NOT include any English text in your response — translate everything to {target}.\n"
-                    f"• CRITICAL: Do NOT confuse different characters/people. "
-                    f"Each person has their own role — do NOT mix up attributes between different people.\n"
-                    f"• If document context is provided, summarise and translate ONLY what is explicitly "
-                    f"stated in the context — do NOT guess or add information not present.\n"
-                    f"• If the document context does NOT contain the answer, say clearly in {target} that "
-                    f"the information is not available in the provided documents.\n"
-                    f"• Answer naturally and conversationally in {target}.\n\n"
+                    f"• The user spoke in English, but you MUST write your ENTIRE response in {target}.\n"
+                    f"• PRIORITY 1 (DOCUMENT CONTEXT): If English document context is provided and contains the answer, extract those facts, translate, and express them in {target}.\n"
+                    f"• PRIORITY 2 (GENERAL KNOWLEDGE): If the provided context does NOT contain the answer, or if no context is provided at all, you must use your own general knowledge to answer the question, translated into {target}.\n"
+                    f"• CRITICAL: Do NOT confuse different characters/people. Each person has their own role — do NOT mix up attributes between different people.\n\n"
                 ) + system_prompt
 
             # ── English mode: enforce English even if session history has other languages ──
@@ -728,47 +690,48 @@ class RAGChatbot:
             if has_context:
                 context = self.retriever.format_context_enhanced(filtered_docs, filtered_metas)
                 if is_multilingual:
-                    # Explicit bilingual scaffold for Hindi/Hinglish answers
                     user_msg = (
-                        "=== DOCUMENT CONTEXT (English) ===\n"
+                        "=== DOCUMENT CONTEXT ===\n"
                         f"{context}\n\n"
                         "=== USER QUESTION ===\n"
                         f"{original_question}\n\n"
-                        "TASK: Using ONLY the information explicitly written in the document context above, "
-                        "answer the question. Write your answer in the same language as the question "
-                        "(Hindi or Hinglish if the question is in those languages). "
-                        "If the context DOES contain the answer, extract it and translate it — do not "
-                        "add details not in the context. "
-                        "If the context does NOT contain the answer to the question, say clearly in the "
-                        "user's language that this specific information is not in the documents."
+                        "TASK: Answer the question using the provided context first. "
+                        "If the context does NOT contain the answer, use your general knowledge. "
+                        "Write your answer in the EXACT same language as the question. "
+                        "Do NOT say 'according to the context' or 'the context does not contain this'. Just answer directly."
                     )
                 elif reply_lang and reply_lang not in ('en-IN', 'en-US', 'en'):
-                    # Translate mode + context: strict bilingual scaffold
                     target = self._LANG_NAMES.get(reply_lang, reply_lang)
                     user_msg = (
-                        "=== DOCUMENT CONTEXT (English) ===\n"
+                        "=== DOCUMENT CONTEXT ===\n"
                         f"{context}\n\n"
                         "=== USER QUESTION ===\n"
                         f"{original_question}\n\n"
-                        f"TASK: Using ONLY the information explicitly written in the document context "
-                        f"above, answer the question. Write your ENTIRE answer in {target}. "
-                        f"Extract and translate facts from the context — do NOT add details not in the "
-                        f"context. If the context does NOT contain the answer, say clearly in {target} "
-                        f"that this information is not available in the documents."
+                        f"TASK: Answer the question using the provided context first. "
+                        f"If the context does NOT contain the answer, use your general knowledge. "
+                        f"Write your ENTIRE answer in {target}. "
+                        f"Do NOT say 'according to the context' or 'the context does not contain this'. Just answer directly."
                     )
                 else:
                     user_msg = self.config.WITH_CONTEXT_TEMPLATE.format(
                         context=context, question=original_question
                     )
+            elif self.config.STRICT_DOCUMENT_MODE:
+                answer = self.config.STRICT_NO_CONTEXT_RESPONSE
+                yield {"type": "token", "data": answer}
+                yield {"type": "done", "data": answer}
+                self._update_conversation_memory(thread_id, original_question, answer)
+                return
             else:
-                if self.config.STRICT_DOCUMENT_MODE:
-                    answer = self.config.STRICT_NO_CONTEXT_RESPONSE
-                    yield {"type": "token", "data": answer}
-                    yield {"type": "done", "data": answer}
-                    self._update_conversation_memory(thread_id, original_question, answer)
-                    return
+                if is_multilingual:
+                    # Allow general knowledge fallback in the user's language
+                    user_msg = (
+                        f"The user asked: {original_question}\n\n"
+                        "No relevant information was found in the indexed documents for this query. "
+                        "Please answer the user's question using your general knowledge. "
+                        "You MUST write your answer in the EXACT same language/script the user used."
+                    )
                 else:
-                    # No relevant docs (or weak context dropped) — answer from general knowledge
                     user_msg = self.config.NO_CONTEXT_TEMPLATE.format(question=original_question)
 
             messages.append({"role": "user", "content": user_msg})

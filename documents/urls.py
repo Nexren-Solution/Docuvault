@@ -8,8 +8,15 @@ urlpatterns = [
     # AUTHENTICATION URLS
     # ============================================================
     path('register/', views.register_view, name='register'),
+    path('pending-approval/', views.pending_approval_view, name='pending_approval'),
+    path('api/approval/status/', views.approval_status_api, name='approval_status_api'),
     path('login/', views.login_view, name='login'),
     path('logout/', views.logout_view, name='logout'),
+    path('admin/approvals/', views.approval_dashboard_view, name='approval_dashboard'),
+    path('admin/users/<int:user_id>/approve/', views.approve_user_view, name='approve_user'),
+    path('admin/users/<int:user_id>/reject/', views.reject_user_view, name='reject_user'),
+    path('api/pending-users/count/', views.pending_users_api, name='pending_users_count'),
+    path('api/dismiss-admin-popup/', views.dismiss_admin_popup, name='dismiss_admin_popup'),
     
     # ============================================================
     # HOME AND DASHBOARD
@@ -99,6 +106,7 @@ urlpatterns = [
     # ============================================================
     path('notifications/', views.notifications_list_view, name='notifications_list'),
     path('notifications/<int:pk>/read/', views.notification_mark_read_view, name='notification_mark_read'),
+    path('notifications/mark-all-read-ajax/', views.notification_mark_all_read_ajax_view, name='notification_mark_all_read_ajax'),
     
     # ============================================================
     # SEARCH URLS
@@ -119,7 +127,15 @@ urlpatterns = [
     path('chatbot/voice/transcribe/', rag_views.voice_transcribe_view, name='voice_transcribe'),
     path('chatbot/history/', rag_views.chat_history_view, name='chat_history'),
     path('chatbot/session/<int:pk>/', rag_views.chat_session_detail_view, name='chat_session_detail'),
+    path('chatbot/session/<int:pk>/delete/', rag_views.delete_session_view, name='delete_session'),
+    path('chatbot/session/<int:pk>/rename/', rag_views.rename_session_view, name='rename_session'),
+    path('chatbot/new/', rag_views.new_chat_view, name='new_chat'),
     path('chatbot/clear/', rag_views.clear_chat_view, name='clear_chat'),
+    path('chatbot/session/<int:pk>/share/', rag_views.share_chat_view, name='share_chat'),
+    path('chatbot/session/<int:pk>/public-share/', rag_views.toggle_public_share_view, name='toggle_public_share'),
+    path('chatbot/shared-with-me/', rag_views.shared_with_me_view, name='shared_with_me'),
+    path('chatbot/shared/<int:pk>/', rag_views.view_shared_chat_view, name='view_shared_chat'),
+    path('chatbot/public/<uuid:token>/', rag_views.public_chat_view, name='public_chat'),
 
     # Voice Assistant (server-side Whisper STT + edge-tts TTS)
     path('voice/', rag_views.voice_assistant_view, name='voice_assistant'),
@@ -148,4 +164,9 @@ urlpatterns = [
     path('agent/heartbeat/',    agent_api.agent_heartbeat_view,   name='agent_heartbeat'),
     path('agent/token/reset/',  agent_api.agent_token_reset_view, name='agent_token_reset'),
     path('agent/status/',       agent_api.agent_status_view,      name='agent_status'),
+
+    # Sync progress — called by desktop agent + polled by frontend
+    path('agent/sync/start/',   views.agent_sync_start_view,      name='agent_sync_start'),
+    path('agent/sync/done/',    views.agent_sync_done_view,        name='agent_sync_done'),
+    path('agent/sync/status/',  views.agent_sync_status_view,     name='agent_sync_status'),
 ]

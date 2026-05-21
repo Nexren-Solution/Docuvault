@@ -1,32 +1,29 @@
 """
 Enhanced Document Processing Module for RAG System
-Supports: PDF text, tables (pdfplumber/Camelot), OCR (Tesseract), and image understanding (BLIP-2)
+Supports: PDF, TXT, DOCX, XLSX text extraction, tables, OCR, and image understanding
 """
-
 import sys
 import os
 import io
 import base64
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
-
 # PDF Processing
 import pdfplumber
 import fitz  # PyMuPDF for fallback
 from pdf2image import convert_from_path
 import camelot  # For complex table extraction
+# Office Document Processing
+import docx
+import pandas as pd
 
 # OCR
 from PIL import Image
 import pytesseract
 
-# Image Understanding (optional — only used when ENABLE_IMAGE_DESCRIPTION=True)
-try:
-    import torch
-    from transformers import Blip2Processor, Blip2ForConditionalGeneration
-    _TRANSFORMERS_AVAILABLE = True
-except ImportError:
-    _TRANSFORMERS_AVAILABLE = False
+# Image Understanding
+import torch
+from transformers import Blip2Processor, Blip2ForConditionalGeneration
 
 # LangChain
 from langchain_core.documents import Document
@@ -48,9 +45,9 @@ def _safe_print(*args, **kwargs):
 class EnhancedDocumentProcessor:
     """
     Advanced document processor with multi-modal capabilities:
-    - Text extraction with pdfplumber
-    - Table extraction with Camelot/pdfplumber
-    - OCR for scanned pages with Tesseract
+    - Text extraction from PDF, TXT, DOCX, and XLSX
+    - Table extraction with Camelot/pdfplumber/pandas
+    - OCR for scanned PDF pages with Tesseract
     - Image understanding with BLIP-2
     """
     
@@ -100,15 +97,7 @@ class EnhancedDocumentProcessor:
             _safe_print(f"✅ BLIP-2 model loaded on {self.device}")
     
     def is_page_scanned(self, page) -> bool:
-        """
-        Detect if a page is scanned/image-based
-        
-        Args:
-            page: pdfplumber page object
-            
-        Returns:
-            True if page appears to be scanned
-        """
+        """Detect if a page is scanned/image-based"""
         text = page.extract_text()
         
         # If very little text but has images, likely scanned
@@ -128,15 +117,7 @@ class EnhancedDocumentProcessor:
         return False
     
     def extract_text_with_pdfplumber(self, pdf_path: str) -> List[Dict]:
-        """
-        Extract text from PDF using pdfplumber (better than PyMuPDF for text)
-        
-        Args:
-            pdf_path: Path to PDF file
-            
-        Returns:
-            List of page dictionaries with text and metadata
-        """
+        """Extract text from PDF using pdfplumber"""
         pages_data = []
         
         with pdfplumber.open(pdf_path) as pdf:
@@ -156,10 +137,10 @@ class EnhancedDocumentProcessor:
                 
                 pages_data.append({
                     'page_number': page_num,
-                    'text': text.strip(),
+                    'text': text.strip() if text else "",
                     'needs_ocr': needs_ocr,
-                    'char_count': len(text),
-                    'word_count': len(text.split()),
+                    'char_count': len(text) if text else 0,
+                    'word_count': len(text.split()) if text else 0,
                     'has_images': len(page.images) > 0,
                     'image_count': len(page.images)
                 })
@@ -169,33 +150,22 @@ class EnhancedDocumentProcessor:
         return pages_data
     
     def ocr_page(self, pdf_path: str, page_num: int) -> str:
-        """
-        Perform OCR on a specific page using Tesseract
-        
-        Args:
-            pdf_path: Path to PDF file
-            page_num: Page number (0-indexed)
-            
-        Returns:
-            Extracted text
-        """
+        """Perform OCR on a specific page using Tesseract"""
         try:
-            # Convert PDF page to image
             images = convert_from_path(
                 pdf_path,
                 first_page=page_num + 1,
                 last_page=page_num + 1,
-                dpi=300  # High DPI for better OCR
+                dpi=300
             )
             
             if not images:
                 return ""
             
-            # Perform OCR
             text = pytesseract.image_to_string(
                 images[0],
                 lang='eng',
-                config='--psm 1'  # Automatic page segmentation with OSD
+                config='--psm 1'
             )
             
             return text.strip()
@@ -205,28 +175,17 @@ class EnhancedDocumentProcessor:
             return ""
     
     def extract_tables_camelot(self, pdf_path: str, page_num: int) -> List[str]:
-        """
-        Extract tables using Camelot (better for complex tables)
-        
-        Args:
-            pdf_path: Path to PDF
-            page_num: Page number (1-indexed for Camelot)
-            
-        Returns:
-            List of table strings in markdown format
-        """
+        """Extract tables using Camelot"""
         try:
-            # Camelot uses 1-based indexing
             tables = camelot.read_pdf(
                 pdf_path,
                 pages=str(page_num + 1),
-                flavor='lattice',  # For tables with lines
+                flavor='lattice',
                 suppress_stdout=True
             )
             
             table_texts = []
             for table in tables:
-                # Convert to markdown format
                 df = table.df
                 markdown_table = df.to_markdown(index=False)
                 table_texts.append(markdown_table)
@@ -235,19 +194,10 @@ class EnhancedDocumentProcessor:
             return table_texts
             
         except Exception as e:
-            # Fallback to pdfplumber for tables
             return []
     
     def extract_tables_pdfplumber(self, page) -> List[str]:
-        """
-        Extract tables using pdfplumber (fallback method)
-        
-        Args:
-            page: pdfplumber page object
-            
-        Returns:
-            List of table strings
-        """
+        """Extract tables using pdfplumber (fallback)"""
         try:
             tables = page.extract_tables()
             
@@ -256,11 +206,9 @@ class EnhancedDocumentProcessor:
             
             table_texts = []
             for table in tables:
-                # Convert to markdown-like format
                 if not table or len(table) == 0:
                     continue
                 
-                # Format as text table
                 table_str = "\n".join([" | ".join([str(cell) if cell else "" for cell in row]) for row in table])
                 table_texts.append(f"\n[TABLE]\n{table_str}\n[/TABLE]\n")
                 self.stats['tables_extracted'] += 1
@@ -271,20 +219,10 @@ class EnhancedDocumentProcessor:
             return []
     
     def extract_images_and_describe(self, pdf_path: str, page_num: int) -> List[Dict]:
-        """
-        Extract images from page and generate descriptions using BLIP-2
-        
-        Args:
-            pdf_path: Path to PDF
-            page_num: Page number
-            
-        Returns:
-            List of image descriptions
-        """
+        """Extract images from page and generate descriptions using BLIP-2"""
         image_descriptions = []
         
         try:
-            # Convert page to image
             images = convert_from_path(
                 pdf_path,
                 first_page=page_num + 1,
@@ -296,21 +234,16 @@ class EnhancedDocumentProcessor:
                 return []
             
             page_image = images[0]
-            
-            # Load BLIP-2 model if not loaded
             self.load_image_model()
             
-            # Process with BLIP-2
+            # Caption
             inputs = self.blip_processor(page_image, return_tensors="pt").to(self.device)
-            
-            # Generate caption
             generated_ids = self.blip_model.generate(**inputs, max_new_tokens=50)
             caption = self.blip_processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
             
-            # Generate detailed description with prompt
+            # Detailed description
             prompt = "Question: What is shown in this image? Describe the key elements. Answer:"
             inputs = self.blip_processor(page_image, text=prompt, return_tensors="pt").to(self.device)
-            
             generated_ids = self.blip_model.generate(**inputs, max_new_tokens=100)
             description = self.blip_processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
             
@@ -328,28 +261,10 @@ class EnhancedDocumentProcessor:
         return image_descriptions
     
     def process_pdf_enhanced(self, pdf_path: str, source_name: str,
-                            extract_tables: bool = True,
-                            describe_images: bool = True) -> List[Dict]:
-        """
-        Enhanced PDF processing with all features
-        
-        Args:
-            pdf_path: Path to PDF file
-            source_name: Document identifier
-            extract_tables: Whether to extract tables
-            describe_images: Whether to describe images with BLIP-2
-            
-        Returns:
-            List of page dictionaries with enhanced content
-        """
-        _safe_print(f"\n📄 Processing: {source_name}")
-        
-        # Reset stats
-        self.stats = {k: 0 for k in self.stats}
-        
+                             extract_tables: bool = True,
+                             describe_images: bool = True) -> List[Dict]:
+        """Enhanced PDF processing with all features"""
         enhanced_pages = []
-        
-        # Extract text with pdfplumber
         pages_data = self.extract_text_with_pdfplumber(pdf_path)
         
         with pdfplumber.open(pdf_path) as pdf:
@@ -357,22 +272,18 @@ class EnhancedDocumentProcessor:
                 page = pdf.pages[page_idx]
                 page_content = page_data['text']
                 
-                # Extract tables if enabled
                 if extract_tables:
-                    # Try Camelot first
                     tables = self.extract_tables_camelot(pdf_path, page_idx)
-                    
-                    # Fallback to pdfplumber
                     if not tables:
                         tables = self.extract_tables_pdfplumber(page)
                     
                     if tables:
-                        page_content += "\n\n" + "\n\n".join(tables)
+                        # Normalize formatting to make sure smart-chunking catches it
+                        formatted_tables = [t if "[TABLE]" in t else f"\n[TABLE]\n{t}\n[/TABLE]\n" for t in tables]
+                        page_content += "\n\n" + "\n\n".join(formatted_tables)
                 
-                # Describe images if enabled and page has images
                 if describe_images and page_data['has_images']:
                     image_descriptions = self.extract_images_and_describe(pdf_path, page_idx)
-                    
                     for img_desc in image_descriptions:
                         page_content += f"\n\n[IMAGE DESCRIPTION: {img_desc['description']}]"
                 
@@ -387,25 +298,103 @@ class EnhancedDocumentProcessor:
                     'has_images': page_data['has_images']
                 })
         
-        # Print statistics
-        _safe_print(f"✅ Processed {self.stats['total_pages']} pages")
-        _safe_print(f"   📝 Text pages: {self.stats['text_pages']}")
-        _safe_print(f"   🔍 OCR pages: {self.stats['ocr_pages']}")
-        _safe_print(f"   📊 Tables extracted: {self.stats['tables_extracted']}")
-        _safe_print(f"   🖼️  Images processed: {self.stats['images_processed']}")
-        
         return enhanced_pages
-    
-    def convert_to_langchain_documents(self, enhanced_pages: List[Dict]) -> List[Document]:
-        """
-        Convert enhanced page data to LangChain Document objects
+
+    def process_txt(self, file_path: str, source_name: str) -> List[Dict]:
+        """Process plain text files."""
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                text = f.read()
+        except UnicodeDecodeError:
+            with open(file_path, 'r', encoding='latin-1') as f:
+                text = f.read()
+                
+        return [{
+            'page_number': 0,
+            'source': source_name,
+            'text': text,
+            'char_count': len(text),
+            'word_count': len(text.split()),
+            'needs_ocr': False,
+            'has_tables': False,
+            'has_images': False
+        }]
+
+    def process_docx(self, file_path: str, source_name: str, extract_tables: bool = True) -> List[Dict]:
+        """Process Word documents, extracting paragraphs and tables."""
+        doc = docx.Document(file_path)
+        content = []
+        has_tables = len(doc.tables) > 0
+
+        for para in doc.paragraphs:
+            if para.text.strip():
+                content.append(para.text)
+
+        if extract_tables and has_tables:
+            for table in doc.tables:
+                data = []
+                for row in table.rows:
+                    row_data = [cell.text.strip().replace('\n', ' ') for cell in row.cells]
+                    data.append(row_data)
+                
+                if len(data) > 1:
+                    try:
+                        df = pd.DataFrame(data[1:], columns=data[0])
+                        markdown_table = df.to_markdown(index=False)
+                        content.append(f"\n[TABLE]\n{markdown_table}\n[/TABLE]\n")
+                        self.stats['tables_extracted'] += 1
+                    except Exception as e:
+                        _safe_print(f"      Table extraction failed in DOCX: {e}")
+
+        full_text = "\n\n".join(content)
+
+        return [{
+            'page_number': 0,
+            'source': source_name,
+            'text': full_text,
+            'char_count': len(full_text),
+            'word_count': len(full_text.split()),
+            'needs_ocr': False,
+            'has_tables': extract_tables and has_tables,
+            'has_images': False
+        }]
+
+    def process_xlsx(self, file_path: str, source_name: str) -> List[Dict]:
+        """Process Excel files by converting sheets directly to Markdown tables."""
+        content = []
         
-        Args:
-            enhanced_pages: List of enhanced page dictionaries
+        try:
+            excel_data = pd.read_excel(file_path, sheet_name=None, engine='openpyxl')
             
-        Returns:
-            List of LangChain Documents
-        """
+            for sheet_name, df in excel_data.items():
+                content.append(f"### Sheet: {sheet_name}")
+                
+                df.dropna(how='all', inplace=True)
+                df.dropna(axis=1, how='all', inplace=True)
+                
+                if not df.empty:
+                    markdown_table = df.to_markdown(index=False)
+                    content.append(f"\n[TABLE]\n{markdown_table}\n[/TABLE]\n")
+                    self.stats['tables_extracted'] += 1
+                    
+        except Exception as e:
+            _safe_print(f"      Excel extraction failed: {e}")
+
+        full_text = "\n\n".join(content)
+
+        return [{
+            'page_number': 0,
+            'source': source_name,
+            'text': full_text,
+            'char_count': len(full_text),
+            'word_count': len(full_text.split()),
+            'needs_ocr': False,
+            'has_tables': True,
+            'has_images': False
+        }]
+
+    def convert_to_langchain_documents(self, enhanced_pages: List[Dict]) -> List[Document]:
+        """Convert enhanced page data to LangChain Document objects"""
         documents = []
         
         for page_data in enhanced_pages:
@@ -425,79 +414,99 @@ class EnhancedDocumentProcessor:
         return documents
     
     def split_documents_smart(self, documents: List[Document]) -> List[Document]:
-        """
-        Smart document splitting that preserves tables and important structures
-        
-        Args:
-            documents: List of LangChain Documents
+            """Smart document splitting that preserves tables and important structures"""
+            chunks = []
             
-        Returns:
-            List of chunked Documents
-        """
-        chunks = []
-        
-        for doc in documents:
-            text = doc.page_content
+            # 1. ADDED: A global counter that persists across ALL pages/documents
+            global_chunk_idx = 0  
             
-            # Check if document has tables
-            has_table = '[TABLE]' in text
-            
-            if has_table:
-                # Split around tables to keep them intact
-                parts = text.split('[TABLE]')
+            for doc in documents:
+                text = doc.page_content
+                has_table = '[TABLE]' in text
                 
-                for i, part in enumerate(parts):
-                    if '[/TABLE]' in part:
-                        # This is a table, keep it whole
-                        table_content = '[TABLE]' + part
-                        chunks.append(Document(
-                            page_content=table_content,
-                            metadata={**doc.metadata, 'chunk_type': 'table', 'chunk_index': i}
-                        ))
-                    else:
-                        # Regular text, split normally
-                        text_chunks = self.text_splitter.split_text(part)
-                        for j, chunk_text in enumerate(text_chunks):
+                if has_table:
+                    parts = text.split('[TABLE]')
+                    
+                    # Removed the 'enumerate(parts)' here since we use the global counter
+                    for part in parts:
+                        if '[/TABLE]' in part:
+                            table_content = '[TABLE]' + part
                             chunks.append(Document(
-                                page_content=chunk_text,
-                                metadata={**doc.metadata, 'chunk_type': 'text', 'chunk_index': f"{i}_{j}"}
+                                page_content=table_content,
+                                metadata={**doc.metadata, 'chunk_type': 'table', 'chunk_index': global_chunk_idx}
                             ))
-            else:
-                # No tables, split normally
-                text_chunks = self.text_splitter.split_documents([doc])
-                for i, chunk in enumerate(text_chunks):
-                    chunk.metadata['chunk_type'] = 'text'
-                    chunk.metadata['chunk_index'] = i
-                    chunks.append(chunk)
-        
-        _safe_print(f"📦 Created {len(chunks)} smart chunks from {len(documents)} pages")
-        
-        return chunks
+                            # 2. ADDED: Increment after appending a table
+                            global_chunk_idx += 1
+                        else:
+                            text_chunks = self.text_splitter.split_text(part)
+                            # Removed the 'enumerate(text_chunks)' here
+                            for chunk_text in text_chunks:
+                                chunks.append(Document(
+                                    page_content=chunk_text,
+                                    metadata={**doc.metadata, 'chunk_type': 'text', 'chunk_index': global_chunk_idx}
+                                ))
+                                # 3. ADDED: Increment after appending standard text around tables
+                                global_chunk_idx += 1
+                else:
+                    text_chunks = self.text_splitter.split_documents([doc])
+                    # Removed 'enumerate(text_chunks)' here as well
+                    for chunk in text_chunks:
+                        chunk.metadata['chunk_type'] = 'text'
+                        
+                        # 4. CHANGED: Use the global counter instead of the loop 'i' index
+                        chunk.metadata['chunk_index'] = global_chunk_idx
+                        chunks.append(chunk)
+                        
+                        # 5. ADDED: Increment for standard page text
+                        global_chunk_idx += 1
+            
+            _safe_print(f"📦 Created {len(chunks)} smart chunks from {len(documents)} pages")
+            
+            return chunks
     
-    def process_document_complete(self, pdf_path: str, 
+    def process_document_complete(self, file_path: str, 
                                   extract_tables: bool = True,
                                   describe_images: bool = False) -> List[Document]:
         """
-        Complete document processing pipeline
-        
-        Args:
-            pdf_path: Path to PDF file
-            extract_tables: Whether to extract tables
-            describe_images: Whether to describe images (resource intensive)
-            
-        Returns:
-            List of chunked LangChain Documents ready for embedding
+        Complete document processing pipeline supporting PDF, TXT, DOCX, XLSX
         """
-        source_name = Path(pdf_path).name
+        path_obj = Path(file_path)
+        source_name = path_obj.name
+        ext = path_obj.suffix.lower()
         
-        # Step 1: Enhanced extraction
-        enhanced_pages = self.process_pdf_enhanced(
-            pdf_path,
-            source_name,
-            extract_tables=extract_tables,
-            describe_images=describe_images
-        )
+        # Reset stats
+        self.stats = {k: 0 for k in self.stats}
         
+        _safe_print(f"\n📄 Processing: {source_name}")
+        
+        # Step 1: Enhanced extraction routed by file type
+        if ext == '.pdf':
+            enhanced_pages = self.process_pdf_enhanced(
+                file_path, source_name, extract_tables, describe_images
+            )
+        elif ext == '.txt':
+            enhanced_pages = self.process_txt(file_path, source_name)
+            self.stats['text_pages'] += 1
+            self.stats['total_pages'] += 1
+        elif ext in ['.docx', '.doc']:
+            enhanced_pages = self.process_docx(file_path, source_name, extract_tables)
+            self.stats['text_pages'] += 1
+            self.stats['total_pages'] += 1
+        elif ext in ['.xlsx', '.xls', '.csv']:
+            enhanced_pages = self.process_xlsx(file_path, source_name)
+            self.stats['text_pages'] += 1
+            self.stats['total_pages'] += 1
+        else:
+            raise ValueError(f"Unsupported file extension: {ext}. Supported formats are PDF, TXT, DOCX, XLSX.")
+        
+        # Print statistics
+        _safe_print(f"✅ Processed {self.stats['total_pages']} blocks/pages")
+        _safe_print(f"   📝 Text pages: {self.stats['text_pages']}")
+        if ext == '.pdf':
+            _safe_print(f"   🔍 OCR pages: {self.stats['ocr_pages']}")
+            _safe_print(f"   🖼️  Images processed: {self.stats['images_processed']}")
+        _safe_print(f"   📊 Tables extracted: {self.stats['tables_extracted']}")
+
         # Step 2: Convert to LangChain documents
         documents = self.convert_to_langchain_documents(enhanced_pages)
         

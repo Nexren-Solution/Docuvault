@@ -162,12 +162,11 @@ def chatbot_view(request):
     # Messages for the active session
     messages_list = chat_session.messages.all()
 
-    # Accessible documents — scoped to the user's organization
-    org = getattr(request.user, 'organization', None)
-    org_filter = Q(owner__organization=org) if org else Q(owner=request.user)
+    # Accessible documents
     user_documents = Document.objects.filter(
-        org_filter,
-        Q(access_level='public') | Q(owner=request.user) | Q(shared_with=request.user)
+        Q(access_level='public') |
+        Q(owner=request.user) |
+        Q(shared_with=request.user)
     ).filter(is_deleted=False).distinct()
 
     indexed_count = DocumentEmbedding.objects.filter(
@@ -251,14 +250,8 @@ def chatbot_query_api(request):
         # Get chatbot
         chatbot = get_rag_chatbot()
         
-        # Resolve org — used for both DB filtering and ChromaDB metadata filter
-        org = getattr(request.user, 'organization', None)
-        org_id = str(org.id) if org else f'user_{request.user.id}'
-        org_filter = Q(owner__organization=org) if org else Q(owner=request.user)
-
         # Build accessible file-path set (OS path + basename) for source filtering
         _acc_qs = Document.objects.filter(
-            org_filter,
             Q(access_level='public') | Q(owner=request.user) | Q(shared_with=request.user),
             is_deleted=False, embedding__is_indexed=True,
         ).exclude(file='')
@@ -274,8 +267,7 @@ def chatbot_query_api(request):
         start_time = time.time()
         answer, sources = chatbot.query(
             question=question,
-            thread_id=str(chat_session.id),
-            org_id=org_id,
+            thread_id=str(chat_session.id)
         )
         retrieval_time = time.time() - start_time
 
@@ -494,167 +486,6 @@ def rename_session_view(request, pk):
     except Exception:
         pass
     return JsonResponse({'ok': True})
-
-
-@login_required
-@require_http_methods(["GET", "POST"])
-def share_chat_view(request, pk):
-    """
-    GET  – return list of org members + current share state (JSON).
-    POST – add or remove a share for the given user id.
-    """
-    from .models import ChatSessionShare, User
-
-    session = get_object_or_404(ChatSession, id=pk, user=request.user)
-    org = getattr(request.user, 'organization', None)
-
-    if request.method == 'GET':
-        # Org members excluding the owner
-        if org:
-            members = User.objects.filter(organization=org).exclude(id=request.user.id)
-        else:
-            members = User.objects.none()
-
-        already_shared = set(
-            ChatSessionShare.objects.filter(session=session).values_list('shared_with_id', flat=True)
-        )
-
-        data = [
-            {
-                'id': u.id,
-                'name': u.get_full_name() or u.username,
-                'username': u.username,
-                'shared': u.id in already_shared,
-            }
-            for u in members
-        ]
-        return JsonResponse({'ok': True, 'members': data})
-
-    # POST – toggle share for one user
-    try:
-        body = json.loads(request.body)
-        user_id = int(body.get('user_id', 0))
-        action = body.get('action', 'add')   # 'add' or 'remove'
-    except (ValueError, TypeError):
-        return JsonResponse({'ok': False, 'error': 'Invalid payload'}, status=400)
-
-    target = get_object_or_404(User, id=user_id)
-
-    # Enforce org boundary
-    if org and target.organization != org:
-        return JsonResponse({'ok': False, 'error': 'User not in your organization'}, status=403)
-
-    if action == 'add':
-        share_obj, created = ChatSessionShare.objects.get_or_create(
-            session=session, shared_with=target,
-            defaults={'shared_by': request.user}
-        )
-        # Fire notification only when a new share is created
-        if created:
-            from .models import Notification
-            sender_name = request.user.get_full_name() or request.user.username
-            Notification.objects.create(
-                recipient=target,
-                sender=request.user,
-                notification_type='chat_shared',
-                title='Chat Shared With You',
-                message=f'{sender_name} shared a conversation with you: "{session.title}"',
-                chat_session=session,
-            )
-    else:
-        ChatSessionShare.objects.filter(session=session, shared_with=target).delete()
-
-    return JsonResponse({'ok': True})
-
-
-@login_required
-def shared_with_me_view(request):
-    """Chatbot-style page listing all chat sessions shared with the current user."""
-    from .models import ChatSessionShare
-
-    shares = (
-        ChatSessionShare.objects
-        .filter(shared_with=request.user)
-        .select_related('session', 'shared_by')
-        .order_by('-created_at')
-    )
-    return render(request, 'rag/shared_with_me.html', {'shares': shares})
-
-
-@login_required
-def view_shared_chat_view(request, pk):
-    """Read-only view of a chat session shared with the current user."""
-    from .models import ChatSessionShare
-
-    # Gracefully handle nonexistent session or unauthorized access
-    try:
-        session = ChatSession.objects.get(id=pk)
-    except ChatSession.DoesNotExist:
-        messages.error(request, 'This conversation does not exist or the link has expired.')
-        return redirect('chatbot')
-
-    is_owner = session.user == request.user
-    is_shared = ChatSessionShare.objects.filter(session=session, shared_with=request.user).exists()
-
-    if not (is_owner or is_shared):
-        messages.error(request, 'You do not have access to this conversation.')
-        return redirect('chatbot')
-
-    messages_list = session.messages.all()
-    return render(request, 'rag/shared_chat.html', {
-        'session': session,
-        'chat_messages': messages_list,
-        'is_owner': is_owner,
-        'owner': session.user,
-    })
-
-
-@login_required
-@require_http_methods(["POST"])
-def toggle_public_share_view(request, pk):
-    """
-    POST — enable or disable the public share link for a chat session.
-    Returns the share URL when enabled, null when disabled.
-    """
-    import uuid as _uuid
-    session = get_object_or_404(ChatSession, id=pk, user=request.user)
-    try:
-        body  = json.loads(request.body)
-        enable = body.get('enable', True)
-    except Exception:
-        enable = True
-
-    if enable:
-        if not session.public_share_token:
-            session.public_share_token = _uuid.uuid4()
-            session.save(update_fields=['public_share_token'])
-        token = str(session.public_share_token)
-        url   = request.build_absolute_uri(f'/chatbot/public/{token}/')
-        return JsonResponse({'ok': True, 'enabled': True, 'token': token, 'url': url})
-    else:
-        session.public_share_token = None
-        session.save(update_fields=['public_share_token'])
-        return JsonResponse({'ok': True, 'enabled': False, 'token': None, 'url': None})
-
-
-def public_chat_view(request, token):
-    """
-    Public read-only view — no login required.
-    Accessible by anyone who has the link (like ChatGPT sharing).
-    """
-    try:
-        session = ChatSession.objects.get(public_share_token=token)
-    except ChatSession.DoesNotExist:
-        return render(request, 'rag/public_chat_not_found.html', status=404)
-
-    messages_list = session.messages.all()
-    return render(request, 'rag/shared_chat.html', {
-        'session':       session,
-        'chat_messages': messages_list,
-        'is_owner':      request.user.is_authenticated and session.user == request.user,
-        'owner':         session.user,
-        'is_public_view': True,
-    })
 
 
 @login_required
@@ -935,10 +766,6 @@ def chatbot_query_stream_view(request):
         except Exception:
             pass
 
-    # Resolve org_id for Excel tool (same logic as the sync endpoint)
-    _stream_org = getattr(request.user, 'organization', None)
-    stream_org_id = str(_stream_org.id) if _stream_org else f'user_{request.user.id}'
-
     def sse_generator():
         # Send session id first so JS can use it immediately
         yield f"data: {json.dumps({'type': 'session', 'session_id': chat_session.id})}\n\n"
@@ -955,7 +782,6 @@ def chatbot_query_stream_view(request):
                 thread_id=str(chat_session.id),
                 reply_lang=reply_lang,
                 use_rewrite=False,  # Disabled: rewriter causes wrong chunks when history is polluted
-                org_id=stream_org_id,
             ):
                 etype = event['type']
 

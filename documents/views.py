@@ -19,13 +19,14 @@ import mimetypes
 
 from .models import (
     User, Role, Document, Category, Tag, DocumentVersion,
-    DocumentComment, SharedLink, Favorite, ActivityLog, Notification, Folder
+    DocumentComment, SharedLink, Favorite, ActivityLog, Notification, Folder,
+    Organization,
 )
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 from .forms import (
-    UserRegistrationForm, UserLoginForm, DocumentForm, CategoryForm,
-    RoleForm, UserProfileForm, CommentForm, SharedLinkForm
+    UserRegistrationForm, UserLoginForm,
+    DocumentForm, CategoryForm, RoleForm, UserProfileForm, CommentForm, SharedLinkForm
 )
 
 
@@ -34,37 +35,78 @@ from .forms import (
 # ============================================================
 
 def register_view(request):
-    """User registration"""
+    """Register a new user. First user of an org becomes its admin (auto-approved)."""
     if request.user.is_authenticated:
+        if not request.user.is_approved:
+            return redirect('pending_approval')
         return redirect('workspace')
 
     if request.method == 'POST':
         form = UserRegistrationForm(request.POST)
         if form.is_valid():
-            user = form.save(commit=False)
-            user.user_type = 'user'  # Default to regular user
+            email = form.cleaned_data['email']
+            domain = email.split('@')[1]
+            parts = domain.split('.')
+            raw_name = parts[-2] if len(parts) >= 2 else parts[0]
+            org_name = raw_name.capitalize()
+
+            org = Organization.objects.filter(name__iexact=org_name).first()
+            if not org:
+                org = Organization.objects.create(name=org_name, is_active=True)
+
+            is_first_user = not User.objects.filter(organization=org).exists()
+
+            user = User(
+                username=form.cleaned_data['username'],
+                email=email,
+                first_name=form.cleaned_data['first_name'],
+                last_name=form.cleaned_data['last_name'],
+                employee_code=form.cleaned_data.get('employee_code', ''),
+                user_type='admin' if is_first_user else 'user',
+                organization=org,
+                is_approved=is_first_user,
+            )
+            user.set_password(form.cleaned_data['password1'])
             user.save()
-            
-            # Assign default role if exists
-            default_role = Role.objects.filter(is_default=True).first()
-            if default_role:
-                user.role = default_role
-                user.save()
-            
-            login(request, user)
-            messages.success(request, 'Account created successfully!')
-            return redirect('workspace')
+
+            if is_first_user:
+                default_role = Role.objects.filter(is_default=True).first()
+                if default_role:
+                    user.role = default_role
+                    user.save()
+                login(request, user)
+                messages.success(request, f'Welcome! You are the admin of {org.name}.')
+                return redirect('workspace')
+            else:
+                login(request, user)
+                return redirect('pending_approval')
     else:
         form = UserRegistrationForm()
-    
-    
+
     return render(request, 'documents/auth/register.html', {'form': form})
+
+
+def pending_approval_view(request):
+    """Shown to authenticated users who are not yet approved."""
+    if not request.user.is_authenticated:
+        return redirect('login')
+    if request.user.is_approved:
+        return redirect('workspace')
+    return render(request, 'documents/auth/pending_approval.html')
+
+
+def approval_status_api(request):
+    """Polled by the pending page to check if the current user has been approved."""
+    if not request.user.is_authenticated:
+        return JsonResponse({'approved': False})
+    user = User.objects.get(pk=request.user.pk)
+    return JsonResponse({'approved': user.is_approved})
 
 
 def login_view(request):
     """User login"""
     if request.user.is_authenticated:
-        return redirect('workspace')
+        return redirect('chatbot')
 
     if request.method == 'POST':
         form = UserLoginForm(request.POST)
@@ -75,8 +117,12 @@ def login_view(request):
 
             if user is not None:
                 login(request, user)
+                if not user.is_approved:
+                    return redirect('pending_approval')
+                if user.is_admin():
+                    request.session['show_admin_popup'] = True
                 messages.success(request, f'Welcome back, {user.username}!')
-                return redirect(request.GET.get('next', 'workspace'))
+                return redirect(request.GET.get('next', 'chatbot'))
             else:
                 messages.error(request, 'Invalid username or password.')
     else:
@@ -85,12 +131,82 @@ def login_view(request):
     return render(request, 'documents/auth/login.html', {'form': form})
 
 
+
 @login_required
 def logout_view(request):
     """User logout"""
     logout(request)
     messages.success(request, 'Logged out successfully.')
     return redirect('home')
+
+
+# ============================================================
+# APPROVAL MANAGEMENT (org admin only)
+# ============================================================
+
+@login_required
+def approval_dashboard_view(request):
+    """Org admin sees all pending users in their org and can approve/reject."""
+    if not request.user.is_admin():
+        raise PermissionDenied
+    pending_users = User.objects.filter(
+        organization=request.user.organization,
+        is_approved=False,
+        is_active=True,
+    ).order_by('created_at')
+    return render(request, 'documents/admin/approval_dashboard.html', {
+        'pending_users': pending_users,
+    })
+
+
+@login_required
+@require_POST
+def approve_user_view(request, user_id):
+    """Approve a pending user. Superstaff can approve anyone; org admin only their own org."""
+    if not request.user.is_admin():
+        return JsonResponse({'error': 'Permission denied.'}, status=403)
+    is_superstaff = request.user.organization is None
+    filters = {'pk': user_id, 'is_approved': False}
+    if not is_superstaff:
+        filters['organization'] = request.user.organization
+    target = get_object_or_404(User, **filters)
+    target.is_approved = True
+    target.save(update_fields=['is_approved'])
+    return JsonResponse({'status': 'approved', 'user_id': user_id, 'username': target.username})
+
+
+@login_required
+@require_POST
+def reject_user_view(request, user_id):
+    """Reject (delete) a pending user. Superstaff can reject anyone; org admin only their own org."""
+    if not request.user.is_admin():
+        return JsonResponse({'error': 'Permission denied.'}, status=403)
+    is_superstaff = request.user.organization is None
+    filters = {'pk': user_id, 'is_approved': False}
+    if not is_superstaff:
+        filters['organization'] = request.user.organization
+    target = get_object_or_404(User, **filters)
+    username = target.username
+    target.delete()
+    return JsonResponse({'status': 'rejected', 'user_id': user_id, 'username': username})
+
+
+def dismiss_admin_popup(request):
+    """Called via AJAX to clear the one-time admin popup session flag."""
+    request.session.pop('show_admin_popup', None)
+    return JsonResponse({'ok': True})
+
+
+@login_required
+def pending_users_api(request):
+    """Returns current pending user count for real-time badge update."""
+    if not request.user.is_admin():
+        return JsonResponse({'count': 0})
+    filters = {'is_approved': False, 'is_active': True}
+    if request.user.organization is not None:
+        filters['organization'] = request.user.organization
+    count = User.objects.filter(**filters).count()
+    return JsonResponse({'count': count})
 
 
 # ============================================================
@@ -250,7 +366,48 @@ def document_detail_view(request, pk):
     comments = document.comments.filter(parent=None).select_related('user').prefetch_related('replies')
     
     # Get ALL versions — full history like GitHub
-    versions = document.versions.select_related('uploaded_by').order_by('-version_number')
+    versions_qs = document.versions.select_related('uploaded_by').order_by('-version_number')
+
+    # Annotate each version with a human-readable event label derived from
+    # the change_note written by the agent (or by manual edits).
+    _TYPE_LABELS = {
+        'initial_sync': ('📥', 'Initial Sync',  'info'),
+        'created':      ('✨', 'File Created',  'success'),
+        'modified':     ('✏️', 'File Updated',  'primary'),
+        'restored':     ('🔄', 'Restored',      'warning'),
+        'deleted':      ('🗑️', 'Deleted',        'danger'),
+        'manual':       ('📝', 'Manual Upload', 'secondary'),
+    }
+
+    def _infer_event(version):
+        note = (version.change_note or '').lower()
+        # Check explicit type prefixes first — most reliable signal
+        if 'initial sync' in note:
+            return _TYPE_LABELS['initial_sync']
+        if 'restore' in note:
+            return _TYPE_LABELS['restored']
+        if 'auto-synced (modified)' in note:
+            return _TYPE_LABELS['modified']
+        # v1 is always a creation regardless of what the note says
+        if version.version_number == 1:
+            if 'auto-synced' in note or 'desktop agent' in note:
+                return _TYPE_LABELS['created']
+            return _TYPE_LABELS['manual']
+        # v2+ from the agent is always an update
+        if 'auto-synced (created)' in note:
+            # agent fired on_created but document already existed → update
+            return _TYPE_LABELS['modified']
+        if 'auto-synced' in note or 'desktop agent' in note:
+            return _TYPE_LABELS['modified']
+        return _TYPE_LABELS['manual']
+
+    versions = []
+    for v in versions_qs:
+        icon, label, badge = _infer_event(v)
+        v.event_icon  = icon
+        v.event_label = label
+        v.event_badge = badge
+        versions.append(v)
     
     # Check if favorited
     is_favorited = Favorite.objects.filter(user=request.user, document=document).exists()
@@ -845,28 +1002,57 @@ def profile_edit_view(request):
 
 @login_required
 def admin_users_list_view(request):
-    """List all users (admin only)"""
+    """Combined org-member list + pending approval management (org admin only)."""
     if not request.user.is_admin():
         raise PermissionDenied()
-    
-    users = User.objects.all().select_related('role').order_by('-created_at')
-    
+
+    org = request.user.organization
+    is_superstaff = org is None  # system-level admin with no specific org
+
+    if is_superstaff:
+        base_qs = User.objects.all().select_related('role', 'organization').order_by('-created_at')
+    else:
+        base_qs = User.objects.filter(organization=org).select_related('role').order_by('-created_at')
+
     search_query = request.GET.get('q', '')
+    tab = request.GET.get('tab', 'all')  # all | approved | pending
+
     if search_query:
-        users = users.filter(
+        base_qs = base_qs.filter(
             Q(username__icontains=search_query) |
             Q(email__icontains=search_query) |
             Q(first_name__icontains=search_query) |
-            Q(last_name__icontains=search_query)
+            Q(last_name__icontains=search_query) |
+            Q(employee_code__icontains=search_query)
         )
-    
-    paginator = Paginator(users, 20)
-    page_number = request.GET.get('page')
-    page_obj = paginator.get_page(page_number)
-    
+
+    if tab == 'approved':
+        filtered_qs = base_qs.filter(is_approved=True)
+    elif tab == 'pending':
+        filtered_qs = base_qs.filter(is_approved=False, is_active=True)
+    else:
+        filtered_qs = base_qs
+
+    paginator = Paginator(filtered_qs, 20)
+    page_obj = paginator.get_page(request.GET.get('page'))
+
+    if is_superstaff:
+        pending_count = User.objects.filter(is_approved=False, is_active=True).count()
+        approved_count = User.objects.filter(is_approved=True).count()
+    else:
+        pending_count = org.members.filter(is_approved=False, is_active=True).count()
+        approved_count = org.members.filter(is_approved=True).count()
+    roles = Role.objects.all().order_by('-level')
+
     return render(request, 'documents/admin/users_list.html', {
         'page_obj': page_obj,
-        'search_query': search_query
+        'search_query': search_query,
+        'tab': tab,
+        'pending_count': pending_count,
+        'approved_count': approved_count,
+        'roles': roles,
+        'org': org,
+        'is_superstaff': is_superstaff,
     })
 
 
@@ -1043,10 +1229,24 @@ def notification_mark_read_view(request, pk):
     notification = get_object_or_404(Notification, pk=pk, recipient=request.user)
     notification.is_read = True
     notification.save()
-    
+
+    # AJAX call from workspace notifications drawer
+    if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+        return JsonResponse({'ok': True})
+
+    if notification.chat_session_id:
+        return redirect('view_shared_chat', pk=notification.chat_session_id)
     if notification.document:
         return redirect('document_detail', pk=notification.document.pk)
     return redirect('notifications_list')
+
+
+@login_required
+@require_POST
+def notification_mark_all_read_ajax_view(request):
+    """Mark all notifications as read (AJAX)"""
+    request.user.notifications.filter(is_read=False).update(is_read=True)
+    return JsonResponse({'ok': True})
 
 
 # ============================================================
@@ -1218,21 +1418,54 @@ def workspace_view(request):
     # All user folders flat list (for "move to folder" dropdown)
     all_folders = Folder.objects.filter(owner=user).order_by('name')
 
+    # Favorites (for unified workspace tab)
+    ws_favorites = (
+        Favorite.objects
+        .filter(user=user)
+        .select_related('document', 'document__owner', 'document__category', 'document__folder')
+        .order_by('-created_at')[:50]
+    )
+
+    # Notifications (for modal)
+    ws_notifications = (
+        user.notifications.all()
+        .order_by('-created_at')[:30]
+    )
+    ws_unread_count = user.notifications.filter(is_read=False).count()
+
+    # Shared docs count for dashboard stats
+    shared_with_me_count = user.shared_documents.filter(is_deleted=False).count()
+
+    # Shared with me documents (for unified workspace tab)
+    ws_shared_docs = (
+        user.shared_documents
+        .filter(is_deleted=False)
+        .select_related('owner', 'folder', 'category')
+        .prefetch_related('versions')
+        .order_by('-updated_at')[:50]
+    )
+
     return render(request, 'documents/workspace.html', {
-        'folder_tree':     folder_tree,
-        'docs':            docs,
-        'current_folder':  current_folder,
-        'panel_title':     panel_title,
-        'folder_id':       folder_id,
-        'search_q':        search_q,
+        'folder_tree':        folder_tree,
+        'docs':               docs,
+        'current_folder':     current_folder,
+        'panel_title':        panel_title,
+        'folder_id':          folder_id,
+        'search_q':           search_q,
         'stats': {
-            'total_docs':    total_docs,
-            'total_folders': total_folders,
-            'total_versions': total_versions,
-            'unfiled':       unfiled_count,
+            'total_docs':      total_docs,
+            'total_folders':   total_folders,
+            'total_versions':  total_versions,
+            'unfiled':         unfiled_count,
+            'shared_with_me':  shared_with_me_count,
+            'favorites':       ws_favorites.count(),
         },
-        'recent_versions': recent_versions,
-        'all_folders':     all_folders,
+        'recent_versions':    recent_versions,
+        'all_folders':        all_folders,
+        'ws_favorites':       ws_favorites,
+        'ws_notifications':   ws_notifications,
+        'ws_unread_count':    ws_unread_count,
+        'ws_shared_docs':     ws_shared_docs,
     })
 
 
@@ -1874,3 +2107,93 @@ def agent_build_log_view(request):
         return JsonResponse({'ok': True, 'log': ''.join(last), 'built': built})
     except FileNotFoundError:
         return JsonResponse({'ok': True, 'log': '', 'built': False})
+
+
+# ============================================================
+# AGENT SYNC PROGRESS — in-memory state (per folder_path)
+# ============================================================
+
+import threading as _threading
+_SYNC_STATE_LOCK = _threading.Lock()
+_SYNC_STATE: dict = {}   # folder_path → {'status': ..., 'total': int, 'done': int}
+
+
+@csrf_exempt
+def agent_sync_start_view(request):
+    """
+    POST /agent/sync/start/
+    Called by the desktop agent when an initial sync begins.
+    Body JSON: { folder_path, total_files }
+    No auth required — relies on the fact that it's only called from localhost
+    (or you can add token auth here if desired).
+    """
+    if request.method != 'POST':
+        return JsonResponse({'ok': False}, status=405)
+    try:
+        data = json.loads(request.body)
+    except ValueError:
+        return JsonResponse({'ok': False, 'error': 'bad json'}, status=400)
+
+    folder_path = data.get('folder_path', '')
+    total       = int(data.get('total_files', 0))
+    with _SYNC_STATE_LOCK:
+        _SYNC_STATE[folder_path] = {
+            'status': 'running',
+            'total':  total,
+            'done':   0,
+        }
+    return JsonResponse({'ok': True})
+
+
+@csrf_exempt
+def agent_sync_done_view(request):
+    """
+    POST /agent/sync/done/
+    Called by the desktop agent when an initial sync finishes.
+    Body JSON: { folder_path, uploaded, skipped }
+    """
+    if request.method != 'POST':
+        return JsonResponse({'ok': False}, status=405)
+    try:
+        data = json.loads(request.body)
+    except ValueError:
+        return JsonResponse({'ok': False, 'error': 'bad json'}, status=400)
+
+    folder_path = data.get('folder_path', '')
+    with _SYNC_STATE_LOCK:
+        state = _SYNC_STATE.get(folder_path, {})
+        state['status']   = 'done'
+        state['uploaded'] = int(data.get('uploaded', 0))
+        state['skipped']  = int(data.get('skipped', 0))
+        _SYNC_STATE[folder_path] = state
+    return JsonResponse({'ok': True})
+
+
+@login_required
+def agent_sync_status_view(request):
+    """
+    GET /agent/sync/status/?folder_path=<path>
+    Returns the current initial-sync progress for a given folder path so the
+    frontend can show a live progress bar / spinner.
+    Also returns aggregate pending-indexing stats so the UI can show how many
+    PDFs are still being processed by the RAG pipeline.
+    """
+    folder_path = request.GET.get('folder_path', '')
+
+    with _SYNC_STATE_LOCK:
+        sync = dict(_SYNC_STATE.get(folder_path, {'status': 'idle', 'total': 0, 'done': 0}))
+
+    # Count documents whose RAG embeddings are still pending / in-progress
+    try:
+        from .models import DocumentEmbedding
+        indexing_count = DocumentEmbedding.objects.filter(
+            index_status__in=['pending', 'indexing']
+        ).count()
+    except Exception:
+        indexing_count = 0
+
+    return JsonResponse({
+        'ok':            True,
+        'sync':          sync,
+        'indexing_count': indexing_count,
+    })

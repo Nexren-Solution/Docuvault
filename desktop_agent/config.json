@@ -1,7 +1,7 @@
 {
   "server_url": "https://know.nexren.ai",
-  "username": "vaibahv",
-  "password": "$Santosh@0007",
+  "username": "admin",
+  "password": "admin123",
   "watch_folders": [
     {
       "path": "C:\\Users\\vkurr\\OneDrive\\Desktop\\Client-Demo",
@@ -14,9 +14,7 @@
         ".pptx",
         ".txt",
         ".csv"
-      ],
-      "folder_id": 6,
-      "folder_name": "Client"
+      ]
     },
     {
       "path": "C:\\Users\\vkurr\\OneDrive\\Desktop\\Testing-1",

@@ -1,5 +1,5 @@
 {% extends 'documents/base.html' %}
-{% block title %}Desktop Agent Setup – DocuVault{% endblock %}
+{% block title %}Desktop Agent Synchronizer Setup – DocuVault{% endblock %}
 
 {% block content %}
 <style>
@@ -128,7 +128,7 @@
 <div class="ag-card" style="margin-bottom:1.5rem">
   <div class="ag-card-head">
     <span>📦</span>
-    <h2>Give the agent to your team</h2>
+    <h2>Give the Desktop Agent Synchronizer to your team</h2>
   </div>
   <div class="ag-card-body">
 
@@ -147,7 +147,7 @@
       <div style="text-align:center;padding:1rem .5rem;border:1px solid #e5e7eb;border-radius:10px">
         <div style="font-size:1.6rem;margin-bottom:.4rem">✅</div>
         <div style="font-weight:700;font-size:.82rem;color:#111;margin-bottom:.25rem">3. Done</div>
-        <div style="font-size:.76rem;color:#6b7280">Agent runs silently, syncing your local folder to DocuVault</div>
+        <div style="font-size:.76rem;color:#6b7280">Desktop Agent Synchronizer runs silently, syncing your local folder to DocuVault</div>
       </div>
     </div>
 
@@ -157,7 +157,7 @@
          style="display:inline-flex;align-items:center;gap:.55rem;background:#2563eb;color:#fff;
                 font-size:.95rem;font-weight:700;padding:.75rem 1.75rem;border-radius:9px;
                 text-decoration:none;box-shadow:0 2px 10px rgba(37,99,235,.28)">
-        ⬇ Download Agent (ZIP)
+        ⬇ Download Desktop Agent Synchronizer (ZIP)
       </a>
       <span style="font-size:.82rem;color:#6b7280">Requires Python 3.10+ — free from <a href="https://www.python.org/downloads/" target="_blank" style="color:#2563eb">python.org</a></span>
     </div>
@@ -178,7 +178,7 @@
       <strong>ℹ️ About watch folders</strong> — Each team member picks <em>their own</em> local folder during setup.
       It does not need to match anything on this page.
       Files saved in that folder are automatically uploaded to DocuVault on this server.
-      The watch folders configured below (Connection settings) only apply to the agent running <em>on this server</em>.
+      The watch folders configured below (Connection settings) only apply to the Desktop Agent Synchronizer running <em>on this server</em>.
     </div>
 
     {% if user.is_staff %}
@@ -192,7 +192,7 @@
         <li>Extract the ZIP, open the folder</li>
         <li>Double-click <code style="background:#f3f4f6;padding:.05rem .3rem;border-radius:3px">RunAgent.bat</code> — it auto-installs packages on first run</li>
         <li>In the popup: enter this server's URL (<strong>{{ server_url }}</strong>), login, and choose a folder to watch</li>
-        <li>Click <strong>Launch Agent</strong> — done. Optionally place a shortcut of <code style="background:#f3f4f6;padding:.05rem .3rem;border-radius:3px">StartAgentBackground.bat</code> in <code style="background:#f3f4f6;padding:.05rem .3rem;border-radius:3px">shell:startup</code> to auto-start on login.</li>
+        <li>Click <strong>Launch Desktop Agent Synchronizer</strong> — done. Optionally place a shortcut of <code style="background:#f3f4f6;padding:.05rem .3rem;border-radius:3px">StartAgentBackground.bat</code> in <code style="background:#f3f4f6;padding:.05rem .3rem;border-radius:3px">shell:startup</code> to auto-start on login.</li>
       </ol>
     </details>
     {% endif %}
@@ -212,7 +212,7 @@
     <span id="ag-status-sub">
       {% if agent_online %}Connected &bull; PID {{ proc_pid|default:"—" }} &bull; heartbeat {{ agent_last|timesince }} ago
       {% elif agent_last %}Last seen {{ agent_last|timesince }} ago &bull; process {{ proc_pid|default:"stopped" }}
-      {% else %}Save your settings below, then click Start Agent{% endif %}
+      {% else %}Save your settings below, then click Start Desktop Agent Synchronizer{% endif %}
     </span>
   </div>
   <div class="ag-banner-btns">
@@ -226,121 +226,6 @@
 <div class="ag-layout">
 <div> <!-- left column -->
 
-  <!-- ── Credentials & server ──────────────────────────────── -->
-  <div class="ag-card">
-    <div class="ag-card-head">
-      <span>🔑</span><h2>Connection settings</h2>
-    </div>
-    <div class="ag-card-body">
-      <div class="form-2col">
-        <div class="form-row">
-          <label>DocuVault server URL</label>
-          <input type="text" id="f-server-url" value="{{ cfg.server_url }}" placeholder="http://localhost:8000">
-          <p class="hint">LAN IP if agent runs on another PC, e.g. http://192.168.1.10:8000</p>
-        </div>
-        <div class="form-row">
-          <label>Username</label>
-          <input type="text" id="f-username" value="{{ cfg.username }}" placeholder="Your DocuVault username">
-        </div>
-      </div>
-      <div class="form-row">
-        <label>Password <span style="color:#9ca3af;font-weight:400">(leave blank to keep existing)</span></label>
-        <input type="password" id="f-password" placeholder="••••••••">
-        <p class="hint">Stored locally in config.json — only used to obtain an agent token on startup</p>
-      </div>
-    </div>
-  </div>
-
-  <!-- ── Watch folders ─────────────────────────────────────── -->
-  <div class="ag-card">
-    <div class="ag-card-head">
-      <span>📂</span><h2>Watch folders</h2>
-      <button class="btn-ghost" onclick="addWatchFolder()" style="font-size:.8rem;padding:.3rem .8rem">＋ Add folder</button>
-    </div>
-    <div class="ag-card-body" id="wf-list">
-      {% for wf in cfg.watch_folders %}
-      <div class="wf-entry" id="wf-{{ forloop.counter0 }}">
-        <button class="wf-remove" onclick="removeWatchFolder(this)" title="Remove">✕</button>
-
-        <div class="form-row">
-          <label>Local folder path</label>
-          <input type="text" class="wf-path" value="{{ wf.path }}" placeholder="C:\Users\you\Documents\Work">
-        </div>
-
-        <div class="form-2col">
-          <div class="form-row">
-            <label>Sync into workspace folder</label>
-            <select class="wf-folder-id">
-              <option value="">— Unfiled —</option>
-              {% for f in all_folders %}
-              <option value="{{ f.id }}" {% if wf.folder_id == f.id %}selected{% endif %}>
-                📁 {{ f.name }}{% if f.parent %} · {{ f.parent.name }}{% endif %}
-              </option>
-              {% endfor %}
-            </select>
-          </div>
-          <div class="form-row">
-            <label>Category label</label>
-            <input type="text" class="wf-category" value="{{ wf.category|default:'General' }}" placeholder="General">
-          </div>
-        </div>
-
-        <div class="form-row">
-          <label>File extensions to sync</label>
-          <div class="ext-wrap" data-exts>
-            {% for ext in wf.extensions %}
-            <span class="ext-tag">{{ ext }}<button onclick="removeExt(this)">×</button></span>
-            {% endfor %}
-          </div>
-          <div class="ext-input-row">
-            <input type="text" class="ext-new" placeholder=".docx" maxlength="10"
-                   onkeydown="if(event.key==='Enter'){event.preventDefault();addExt(this)}">
-            <button class="btn-add-ext" onclick="addExt(this.previousElementSibling)">Add</button>
-          </div>
-        </div>
-
-        <label style="font-size:.82rem;color:#374151;display:flex;align-items:center;gap:.5rem;cursor:pointer">
-          <input type="checkbox" class="wf-recursive" {% if wf.recursive %}checked{% endif %}>
-          Include subfolders (recursive)
-        </label>
-      </div>
-      {% empty %}
-      <p id="wf-empty" style="font-size:.85rem;color:#9ca3af;text-align:center;padding:1.5rem 0">
-        No watch folders yet. Click <strong>＋ Add folder</strong> to start.
-      </p>
-      {% endfor %}
-    </div>
-  </div>
-
-  <!-- ── Sync settings ─────────────────────────────────────── -->
-  <div class="ag-card">
-    <div class="ag-card-head"><span>⚙️</span><h2>Sync settings</h2></div>
-    <div class="ag-card-body">
-      <div class="form-2col">
-        <div class="form-row">
-          <label>Debounce (seconds)</label>
-          <input type="number" id="f-debounce" value="{{ cfg.sync.debounce_seconds|default:3 }}" min="1" max="30">
-          <p class="hint">Wait this long after the last file save before uploading</p>
-        </div>
-        <div class="form-row">
-          <label>Heartbeat interval (seconds)</label>
-          <input type="number" id="f-heartbeat" value="{{ cfg.sync.heartbeat_interval_seconds|default:60 }}" min="10" max="300">
-          <p class="hint">How often the agent pings DocuVault to show it's online</p>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- ── Save + start/stop ─────────────────────────────────── -->
-  <div class="btn-row" style="margin-bottom:2rem">
-    <button class="btn-primary" onclick="saveConfig()" id="btn-save">
-      💾 Save configuration
-    </button>
-    <button class="btn-success" onclick="saveAndStart()" id="btn-save-start">
-      💾▶ Save &amp; Start Agent
-    </button>
-    <span id="save-msg" style="font-size:.82rem;color:#16a34a;display:none">✓ Saved</span>
-  </div>
 
 </div><!-- /left -->
 
@@ -361,7 +246,7 @@
             <td id="proc-pid-cell">{{ proc_pid|default:"—" }}</td></tr>
         <tr><td style="color:#6b7280;padding:.35rem 0">Heartbeat</td>
             <td id="proc-hb-cell">{% if agent_last %}{{ agent_last|timesince }} ago{% else %}—{% endif %}</td></tr>
-        <tr><td style="color:#6b7280;padding:.35rem 0;vertical-align:top">Agent dir</td>
+        <tr><td style="color:#6b7280;padding:.35rem 0;vertical-align:top">Desktop Agent Synchronizer dir</td></tr>
             <td style="font-family:monospace;font-size:.75rem;word-break:break-all;color:#6b7280">{{ agent_dir }}</td></tr>
       </table>
       <div style="margin-top:.9rem">
@@ -468,7 +353,7 @@ function startAgent(){
   fetch('{% url "agent_process_start" %}',{
     method:'POST',credentials:'same-origin',headers:{'X-CSRFToken':CSRF}
   }).then(function(r){return r.json();}).then(function(d){
-    btn.disabled=false; btn.innerHTML='▶ Start Agent';
+    btn.disabled=false; btn.innerHTML='▶ Start Desktop Agent Synchronizer';
     if(d.ok){
       toast(d.message);
       btn.style.display='none';
@@ -480,14 +365,14 @@ function startAgent(){
 
 /* ── Stop agent ─────────────────────────────── */
 function stopAgent(){
-  if(!confirm('Stop the Desktop Agent?')) return;
+  if(!confirm('Stop the Desktop Agent Synchronizer?')) return;
   var btn=document.getElementById('btn-stop');
   btn.disabled=true; btn.innerHTML='<span class="spinner"></span> Stopping…';
   fetch('{% url "agent_process_stop" %}',{
     method:'POST',credentials:'same-origin',headers:{'X-CSRFToken':CSRF}
   }).then(function(r){return r.json();}).then(function(d){
-    btn.disabled=false; btn.innerHTML='■ Stop Agent';
-    toast(d.message||(d.ok?'Agent stopped':'Stop failed'), !d.ok);
+    btn.disabled=false; btn.innerHTML='■ Stop Desktop Agent Synchronizer';
+    toast(d.message||(d.ok?'Desktop Agent Synchronizer stopped':'Stop failed'), !d.ok);
     if(d.ok){
       btn.style.display='none';
       document.getElementById('btn-start').style.display='';
@@ -516,17 +401,17 @@ function pollStatus(){
 
       if(d.online){
         banner.className='ag-banner green'; dot.className='ag-banner-dot green';
-        txt.textContent='Agent is running';
+        txt.textContent='Desktop Agent Synchronizer is running';
         sub.textContent='Connected · PID '+(d.pid||'—')+' · heartbeat '+(d.last_seen?ta(d.last_seen)+'ago':'–');
         procCell.innerHTML='<span style="color:#16a34a;font-weight:600">● Running</span>';
       } else if(d.last_seen){
         banner.className='ag-banner yellow'; dot.className='ag-banner-dot yellow';
-        txt.textContent='Agent offline';
+        txt.textContent='Desktop Agent Synchronizer offline';
         sub.textContent='Last seen '+ta(d.last_seen)+' ago';
         procCell.innerHTML='<span style="color:#f59e0b;font-weight:600">● Offline</span>';
       } else {
         banner.className='ag-banner grey'; dot.className='ag-banner-dot grey';
-        txt.textContent='Agent not started'; sub.textContent='Click Start Agent below';
+        txt.textContent='Desktop Agent Synchronizer not started'; sub.textContent='Click Start Desktop Agent Synchronizer below';
         procCell.innerHTML='<span style="color:#9ca3af">● Stopped</span>';
       }
       if(pidCell) pidCell.textContent=d.pid||'—';

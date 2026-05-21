@@ -4,12 +4,26 @@ from django.core.exceptions import ValidationError
 from .models import User, Document, Category, Role, DocumentComment, SharedLink, Tag
 import datetime
 
+BLOCKED_EMAIL_DOMAINS = {
+    'gmail.com', 'googlemail.com',
+    'outlook.com', 'hotmail.com', 'hotmail.co.uk', 'live.com', 'live.co.uk', 'msn.com',
+    'yahoo.com', 'yahoo.co.uk', 'yahoo.fr', 'yahoo.de', 'yahoo.es', 'ymail.com',
+    'icloud.com', 'me.com', 'mac.com',
+    'aol.com', 'aim.com',
+    'protonmail.com', 'pm.me', 'proton.me',
+    'mail.com', 'gmx.com', 'gmx.net', 'gmx.de',
+    'inbox.com', 'fastmail.com', 'fastmail.fm',
+    'tutanota.com', 'tuta.io',
+    'yandex.com', 'yandex.ru',
+    'qq.com', '163.com', '126.com',
+}
+
 
 class UserRegistrationForm(UserCreationForm):
-    """User registration form"""
+    """User registration form. Organization is derived automatically from the email domain."""
     email = forms.EmailField(required=True, widget=forms.EmailInput(attrs={
         'class': 'form-control',
-        'placeholder': 'Email address'
+        'placeholder': 'Work email address'
     }))
     first_name = forms.CharField(required=True, max_length=150, widget=forms.TextInput(attrs={
         'class': 'form-control',
@@ -19,10 +33,14 @@ class UserRegistrationForm(UserCreationForm):
         'class': 'form-control',
         'placeholder': 'Last name'
     }))
+    employee_code = forms.CharField(required=False, max_length=100, widget=forms.TextInput(attrs={
+        'class': 'form-control',
+        'placeholder': 'Employee code (optional)'
+    }))
 
     class Meta:
         model = User
-        fields = ('username', 'email', 'first_name', 'last_name', 'password1', 'password2')
+        fields = ('username', 'email', 'first_name', 'last_name', 'employee_code', 'password1', 'password2')
         widgets = {
             'username': forms.TextInput(attrs={
                 'class': 'form-control',
@@ -42,7 +60,13 @@ class UserRegistrationForm(UserCreationForm):
         })
 
     def clean_email(self):
-        email = self.cleaned_data.get('email')
+        email = self.cleaned_data.get('email', '').lower()
+        domain = email.split('@')[-1] if '@' in email else ''
+        if domain in BLOCKED_EMAIL_DOMAINS:
+            raise ValidationError(
+                "Personal email addresses (Gmail, Outlook, Yahoo, etc.) are not allowed. "
+                "Please use your work email."
+            )
         if User.objects.filter(email=email).exists():
             raise ValidationError("A user with this email already exists.")
         return email
@@ -175,9 +199,14 @@ class DocumentForm(forms.ModelForm):
             self.fields['file'].required = False
             self.fields['file'].help_text = 'Leave blank to keep the current file'
         
-        # Filter shared_with to exclude current user
+        # Filter shared_with to only users in the same organization
         if self.user:
-            self.fields['shared_with'].queryset = User.objects.exclude(id=self.user.id)
+            org = getattr(self.user, 'organization', None)
+            if org:
+                qs = User.objects.filter(organization=org).exclude(id=self.user.id)
+            else:
+                qs = User.objects.exclude(id=self.user.id)
+            self.fields['shared_with'].queryset = qs
         
         # Pre-populate tags if editing
         if self.instance and self.instance.pk:
